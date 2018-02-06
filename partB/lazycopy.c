@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "lazycopy.h"
 
 #include <stdint.h>
