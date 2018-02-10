@@ -8,12 +8,79 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <signal.h>
+
+/** 
+ * Global bookeeping structure. 
+ */
+typedef struct node {
+  void * start_address;
+  size_t size;
+  struct node * next;
+} node_t;
+
+typedef struct list {
+  node_t * first;
+} list_t;
+  
+/** 
+ * Initialize bookkeeping structure.
+ */
+list_t read_blocks = {NULL};
+
+/** 
+ * ADDED FUNCTION: This function is our signal handler.
+ */
+void copy_handler (int signal, siginfo_t* info, void * ctx) {
+  intptr_t seg_address = (intptr_t)info->si_addr;
+  node_t * current_node = read_blocks.first;
+
+  node_t * prev_node = NULL;
+  while(current_node != NULL){
+    if((seg_address >= (intptr_t)current_node->start_address) &&
+       (seg_address <= (intptr_t)(current_node->start_address+
+                                  current_node->size))) {
+          printf("test\n");
+      void * test = mmap(current_node->start_address, current_node->size, PROT_READ | PROT_WRITE,
+           MAP_ANONYMOUS | MAP_SHARED | MAP_FIXED, -1, 0);
+      if (current_node->start_address == test) {
+        printf("this worked?\n");
+      }
+      
+      memcpy(test, current_node->start_address, current_node->size);
+      if(prev_node == NULL){
+        read_blocks.first = current_node->next;
+        free(current_node);
+        return;
+      } else {
+        prev_node->next = current_node->next;
+        free(current_node);
+        return;
+      }
+    }
+    
+    prev_node = current_node;
+    current_node = current_node->next;
+  }
+
+  printf("Yeah, no, you actually segfaulted. Sorry.\n");
+  exit(EXIT_FAILURE);
+}
 
 /**
  * This function will be called at startup so you can set up a signal handler.
  */
 void chunk_startup() {
-  // TODO: Implement this function
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(struct sigaction));
+  sa.sa_sigaction = copy_handler;
+  sa.sa_flags = SA_SIGINFO;
+  
+  // Set the signal handler, checking for errors
+  if(sigaction(SIGSEGV, &sa, NULL) != 0) {
+    perror("sigaction failed");
+    exit(2);
+  } 
 }
 
 /**
@@ -70,17 +137,47 @@ void* chunk_copy_eager(void* chunk) {
  *   the original chunk.
  */
 void* chunk_copy_lazy(void* chunk) {
-  // Just to make sure your code works, this implementation currently calls the eager copy version
-  return chunk_copy_eager(chunk);
-  
+
+  size_t size_chunk = sizeof(*chunk);
   // Your implementation should do the following:
   // 1. Use mremap to create a duplicate mapping of the chunk passed in
+  void * new_address = mremap(chunk, 0, size_chunk, MREMAP_MAYMOVE);
+  if (new_address == NULL) {
+    printf("what\n");
+  }
+  if (new_address == MAP_FAILED) {
+    perror("Yikes, something happened: ");
+    exit(EXIT_FAILURE);
+  }
   // 2. Mark both mappings as read-only
+  mprotect(chunk, size_chunk, PROT_READ);
+  mprotect(new_address, size_chunk, PROT_READ);
   // 3. Keep some record of both lazy copies so you can make them writable later.
   //    At a minimum, you'll need to know where the chunk begins and ends.
-  
+
+  node_t * current_node;
+  current_node = read_blocks.first;
+  while (current_node != NULL) {
+    current_node = current_node->next;
+  }
+  current_node = malloc (sizeof (node_t));
+  if (current_node == NULL) {
+    perror ("Malloc failed: ");
+    exit(EXIT_FAILURE);
+  }
+  current_node->start_address = chunk;
+  current_node->size = size_chunk;
+  node_t * next_node = malloc (sizeof (node_t));
+  current_node->next = next_node;
+  next_node->start_address = new_address;   
+  next_node->size = size_chunk;
+  next_node->next = read_blocks.first;
+  read_blocks.first = current_node;
   // Later, if either copy is written to you will need to:
   // 1. Save the contents of the chunk elsewhere (a local array works well)
   // 2. Use mmap to make a writable mapping at the location of the chunk that was written
   // 3. Restore the contents of the chunk to the new writable mapping
+
+  return new_address;
 }
+
